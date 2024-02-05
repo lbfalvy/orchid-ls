@@ -1,0 +1,47 @@
+{
+	"folders": [
+		{
+			"path": "./client",
+			"name": "Client"
+		},
+		{
+			"path": "./server",
+			"name": "Server"
+		},
+		{
+			"path": ".",
+			"name": "Root",
+		}
+	],
+	"settings": {
+		"[markdown]": {
+			"editor.unicodeHighlight.ambiguousCharacters": false,
+			"editor.unicodeHighlight.invisibleCharacters": false,
+			"diffEditor.ignoreTrimWhitespace": false,
+			"editor.wordWrap": "bounded",
+			"editor.wordWrapColumn": 80,
+			"editor.quickSuggestions": {
+				"comments": "off",
+				"strings": "off",
+				"other": "off"
+			},
+			"editor.lineNumbers": "off",
+			"editor.glyphMargin": false,
+			"editor.rulers": [],
+			"editor.guides.indentation": false,
+			"editor.formatOnSave": true,
+			"editor.formatOnType": true,
+		},
+		"[rust]": {
+			"editor.rulers": [
+				100
+			],
+		},
+		"rust-analyzer.showUnlinkedFileNotification": false,
+		"rust-analyzer.checkOnSave": true,
+		"rust-analyzer.check.command": "clippy",
+		"rust-analyzer.rustfmt.extraArgs": [
+			"+nightly"
+		],
+	}
+}

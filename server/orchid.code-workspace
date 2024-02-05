@@ -1,0 +1,53 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"[markdown]": {
+			"editor.unicodeHighlight.ambiguousCharacters": false,
+			"editor.unicodeHighlight.invisibleCharacters": false,
+			"diffEditor.ignoreTrimWhitespace": false,
+			"editor.wordWrap": "bounded",
+			"editor.wordWrapColumn": 80,
+			"editor.quickSuggestions": {
+				"comments": "off",
+				"strings": "off",
+				"other": "off"
+			},
+			"editor.lineNumbers": "off",
+			"editor.glyphMargin": false,
+			"editor.rulers": [],
+			"editor.guides.indentation": false,
+			"editor.formatOnSave": true,
+			"editor.formatOnType": true,
+		},
+		"[rust]": {
+			"editor.rulers": [
+				100
+			],
+		},
+		"rust-analyzer.showUnlinkedFileNotification": false,
+		"rust-analyzer.checkOnSave": true,
+		"rust-analyzer.check.command": "clippy",
+		"rust-analyzer.rustfmt.extraArgs": [
+			"+nightly"
+		],
+		"files.associations": {
+			"*.mjsd": "markdown"
+		},
+		"swissknife.notesEnabled": false,
+	},
+	"extensions": {
+		"recommendations": [
+			"maptz.regionfolder",
+			"serayuzgur.crates",
+			"tamasfe.even-better-toml",
+			"yzhang.markdown-all-in-one",
+			"gruntfuggly.todo-tree",
+			"vadimcn.vscode-lldb",
+			"rust-lang.rust-analyzer"
+		]
+	},
+}

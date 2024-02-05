@@ -1,0 +1,63 @@
+{
+  "name": "orchid-ls",
+  "displayName": "OrchidLS",
+  "description": "Language server support for Orchid",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.86.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onLanguage:orchid"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "orchid",
+        "aliases": [
+          "Orchid",
+          "orc"
+        ],
+        "extensions": [
+          ".orc"
+        ],
+        "icon": {
+          "dark": "./public/icon-tiny.svg",
+          "light": "./public/icon-tiny.svg"
+        }
+      }
+    ],
+    "commands": [
+      {
+        "command": "orchid-ls.restart-server",
+        "title": "Restart Orchid language server"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch:client": "tsc -watch --preserveWatchOutput -p ./",
+    "watch": "cd ..; npm run watch",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.6",
+    "@types/node": "18.x",
+    "@types/vscode": "^1.86.0",
+    "@typescript-eslint/eslint-plugin": "^6.19.1",
+    "@typescript-eslint/parser": "^6.19.1",
+    "@vscode/test-cli": "^0.0.4",
+    "@vscode/test-electron": "^2.3.9",
+    "eslint": "^8.56.0",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}
