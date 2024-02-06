@@ -25,8 +25,8 @@
           ".orc"
         ],
         "icon": {
-          "dark": "./public/icon-tiny.svg",
-          "light": "./public/icon-tiny.svg"
+          "dark": "./public/outline-flower.svg",
+          "light": "./public/fill-flower.svg"
         }
       }
     ],
