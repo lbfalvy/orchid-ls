@@ -1,13 +1,18 @@
+use std::borrow::{Borrow, BorrowMut};
 use std::collections::HashMap;
 use std::fmt;
+use std::marker::PhantomData;
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::AtomicI64;
-use std::sync::{atomic, Arc, Mutex};
+use std::sync::{atomic, Arc, Mutex, MutexGuard};
 
 use anyhow::anyhow;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use trait_set::trait_set;
 
-use crate::protocol::error::LSErrCode;
+use crate::ctx_map::CtxMap;
+use crate::protocol::error::LSPErrCode;
 
 static NEXT_REQ: AtomicI64 = AtomicI64::new(0);
 
@@ -45,13 +50,27 @@ impl AsyncReq {
   pub fn progress(&self, token: Value, value: Value) {
     self.comm.lock().unwrap().send_progress(token, value)
   }
+  pub fn set<T: Send + Sync + 'static>(&mut self, ctx: T) {
+    self.comm.lock().unwrap().context.set(ctx)
+  }
+  pub fn lock(&self) -> impl DerefMut<Target = CtxMap> + '_ {
+    struct Guard<'b>(MutexGuard<'b, CommState>);
+    impl<'b> Deref for Guard<'b> {
+      type Target = CtxMap;
+      fn deref(&self) -> &Self::Target { &self.0.context }
+    }
+    impl<'b> DerefMut for Guard<'b> {
+      fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0.context }
+    }
+    Guard(self.comm.lock().unwrap())
+  }
 }
 impl Drop for AsyncReq {
   fn drop(&mut self) {
     if !self.resolved {
       if self.abort.aborted() {
         let err = anyhow!("Request cancelled by client");
-        self.resolve_impl(Err(err.context(LSErrCode::RequestCancelled)))
+        self.resolve_impl(Err(err.context(LSPErrCode::RequestCancelled)))
       }
       eprintln!("Dangling request {self:?} dropped")
     }
@@ -64,15 +83,16 @@ impl fmt::Debug for AsyncReq {
 }
 
 trait_set! {
-  pub trait ReqHandler = for<'a> FnMut(Option<&'a Value>) -> anyhow::Result<Value>;
+  pub trait ReqHandler =
+    for<'a, 'b> FnMut(Option<&'a Value>, &'b mut CtxMap) -> anyhow::Result<Value>;
   pub trait AsyncReqHandler = FnMut(AsyncReq);
-  pub trait NotifHandler = for<'a> FnMut(Option<&'a Value>);
+  pub trait NotifHandler = for<'a, 'b> FnMut(Option<&'a Value>, &'b mut CtxMap);
   pub trait SendCB = FnMut(Value) + Send;
   pub trait ResHandler = FnMut(Result<Value, ResponseError>) + Send;
 }
 
 pub struct ResponseError {
-  pub code: i64,
+  pub code: LSPErrCode,
   pub message: String,
   pub data: Option<Value>,
 }
@@ -80,10 +100,15 @@ pub struct ResponseError {
 struct CommState {
   ingress: HashMap<i64, Abort>,
   egress: HashMap<i64, Box<dyn ResHandler>>,
+  context: CtxMap,
   send: Box<dyn SendCB>,
 }
 impl CommState {
-  fn send(&mut self, data: Value) { (self.send)(data) }
+  fn send(&mut self, mut data: Value) {
+    data["jsonrpc"] = json!("2.0");
+    eprintln!("Sending {data}");
+    (self.send)(data)
+  }
   fn send_resp(&mut self, id: i64, result: anyhow::Result<Value>) {
     self.send(match result {
       Ok(val) => json!({
@@ -91,11 +116,11 @@ impl CommState {
         "result": val
       }),
       Err(e) => {
-        let code = e.downcast_ref::<LSErrCode>().copied().unwrap_or(LSErrCode::RequestFailed);
+        let code = e.downcast_ref::<LSPErrCode>().copied().unwrap_or(LSPErrCode::RequestFailed);
         json!({
           "id": id,
           "error": {
-            "code": i64::from(code),
+            "code": code,
             "message": format!("{e}"),
             "data": e.downcast::<Value>().unwrap_or(Value::Null)
           }
@@ -119,7 +144,7 @@ impl CommState {
     let res = msg.get("result").ok_or_else(|| {
       let err = msg.get("error").unwrap().as_object().unwrap();
       ResponseError {
-        code: err["code"].as_i64().unwrap(),
+        code: LSPErrCode::deserialize(err["code"].clone()).unwrap(),
         data: err.get("data").cloned(),
         message: err["message"].as_str().unwrap().to_string(),
       }
@@ -146,6 +171,7 @@ impl JrpcServer {
         ingress: HashMap::new(),
         egress: HashMap::new(),
         send: Box::new(send),
+        context: CtxMap::new(),
       })),
     }
   }
@@ -163,6 +189,7 @@ impl JrpcServer {
   }
 
   pub fn recv(&mut self, message: Value) {
+    eprintln!("Received {message}");
     let mut comm_guard = self.comm.lock().unwrap();
     let obj = message.as_object().expect("All messages are objects");
     let id = obj.get("id").map(|id| id.as_i64().expect("If ID exists, it's an uint"));
@@ -173,7 +200,7 @@ impl JrpcServer {
         match id {
           None => match self.notif_hands.get_mut(name) {
             None => eprintln!("Unrecognized notification {name}"),
-            Some(handler) => handler(params),
+            Some(handler) => handler(params, &mut comm_guard.context),
           },
           Some(id) =>
             if name == "$/cancelRequest" {
@@ -182,7 +209,8 @@ impl JrpcServer {
                 abort.abort();
               }
             } else if let Some(handler) = self.sync_hands.get_mut(name) {
-              comm_guard.send_resp(id, handler(params));
+              let res = handler(params, &mut comm_guard.context);
+              comm_guard.send_resp(id, res);
             } else if let Some(handler) = self.async_hands.get_mut(name) {
               let abort = Abort::new();
               comm_guard.ingress.insert(id, abort.clone());
@@ -197,7 +225,7 @@ impl JrpcServer {
             } else if name.starts_with("$/") {
               eprintln!("Unrecognized optional request {name}");
               let err = anyhow::anyhow!("Unsupported request");
-              comm_guard.send_resp(id, Err(err.context(LSErrCode::MethodNotFound)))
+              comm_guard.send_resp(id, Err(err.context(LSPErrCode::MethodNotFound)))
             } else {
               panic!("Unrecognized request {name}")
             },
@@ -220,7 +248,7 @@ mod test {
     let replies = Arc::new(Mutex::new(Vec::new()));
     let rep2 = replies.clone();
     let mut srv = JrpcServer::new(move |_| panic!("Message should not be sent here"));
-    srv.on_notif("hello", move |m| rep2.lock().unwrap().push(m.unwrap().clone()));
+    srv.on_notif("hello", move |m, _| rep2.lock().unwrap().push(m.unwrap().clone()));
     srv.recv(json!({ "method": "hello", "params": "World!" }));
     assert!(serde_json::to_string(&replies.lock().unwrap()[..]).unwrap() == r#"["World!"]"#)
   }
@@ -230,7 +258,7 @@ mod test {
     let replies = Arc::new(Mutex::new(Vec::new()));
     let rep2 = replies.clone();
     let mut srv = JrpcServer::new(move |m| rep2.lock().unwrap().push(m));
-    srv.on_req_sync("hello", |p| {
+    srv.on_req_sync("hello", |p, _| {
       assert_eq!(p.unwrap().as_str(), Some("World!"));
       Ok(p.unwrap().clone())
     });

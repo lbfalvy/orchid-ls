@@ -2,10 +2,12 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 /// Error codes recognized by LSP. Paraphrased from
 /// [The LSP spec](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/)
-#[derive(Clone, Copy, Debug)]
-pub enum LSErrCode {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LSPErrCode {
   /// Defined by JSON-RPC
   ParseError,
   /// Defined by JSON-RPC
@@ -46,25 +48,50 @@ pub enum LSErrCode {
 
   /// The client has canceled a request and a server as detected the cancel.
   RequestCancelled,
+
+  UnclassifiedError(i64),
 }
-impl fmt::Display for LSErrCode {
+
+#[allow(deprecated)] // clearly, we have to match deprecated values.
+static CODE_MAP: &[(LSPErrCode, i64)] = &[
+  (LSPErrCode::ParseError, -32700),
+  (LSPErrCode::InvalidRequest, -32600),
+  (LSPErrCode::MethodNotFound, -32601),
+  (LSPErrCode::InvalidParams, -32602),
+  (LSPErrCode::InternalError, -32603),
+  (LSPErrCode::ServerNotInitialized, -32002),
+  (LSPErrCode::Unknown, -32001),
+  (LSPErrCode::RequestFailed, -32803),
+  (LSPErrCode::ServerCancelled, -32802),
+  (LSPErrCode::ContentModified, -32801),
+  (LSPErrCode::RequestCancelled, -32800),
+];
+
+impl fmt::Display for LSPErrCode {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{self:?}") }
 }
-impl From<LSErrCode> for i64 {
-  #[allow(deprecated)] // clearly, we have to match deprecated values.
-  fn from(value: LSErrCode) -> Self {
+impl From<LSPErrCode> for i64 {
+  fn from(value: LSPErrCode) -> Self {
     match value {
-      LSErrCode::ParseError => -32700,
-      LSErrCode::InvalidRequest => -32600,
-      LSErrCode::MethodNotFound => -32601,
-      LSErrCode::InvalidParams => -32602,
-      LSErrCode::InternalError => -32603,
-      LSErrCode::ServerNotInitialized => -32002,
-      LSErrCode::Unknown => -32001,
-      LSErrCode::RequestFailed => -32803,
-      LSErrCode::ServerCancelled => -32802,
-      LSErrCode::ContentModified => -32801,
-      LSErrCode::RequestCancelled => -32800,
+      LSPErrCode::UnclassifiedError(code) => code,
+      _ => CODE_MAP.iter().find(|(ec, _)| ec == &value).unwrap().1,
     }
+  }
+}
+impl From<i64> for LSPErrCode {
+  fn from(value: i64) -> Self {
+    CODE_MAP.iter().find(|(_, i)| i == &value).map_or(LSPErrCode::UnclassifiedError(value), |p| p.0)
+  }
+}
+impl Serialize for LSPErrCode {
+  fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+  where S: serde::Serializer {
+    serializer.serialize_i64((*self).into())
+  }
+}
+impl<'de> Deserialize<'de> for LSPErrCode {
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where D: serde::Deserializer<'de> {
+    Ok(i64::deserialize(deserializer)?.into())
   }
 }

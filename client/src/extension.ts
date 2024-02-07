@@ -1,6 +1,7 @@
 // The module 'vscode' contains the VS Code extensibility API
 // Import the module and reference it with the alias vscode in your code below
 import path from 'path';
+import child_process from "child_process";
 import fs from "fs/promises";
 import * as vscode from 'vscode';
 import { LanguageClient, LanguageClientOptions, ServerOptions, State, TransportKind } from "vscode-languageclient/node";
@@ -12,21 +13,36 @@ export function activate(context: vscode.ExtensionContext) {
 
 	const LS_NAME = process.platform === "win32" ? "orchid-ls.exe" : "orchid-ls";
 	const LS_PATH = context.asAbsolutePath(path.join("public", LS_NAME));
-	const serverOptions: ServerOptions = {
-		command: LS_PATH,
-		transport: TransportKind.stdio,
-	};
 	const clientOptions: LanguageClientOptions = {
 		documentSelector: [{ scheme: "file", language: "orchid" }],
 	};
 	const client = new LanguageClient(
 		"OrchidLS",
 		"Orchid Language Server",
-		serverOptions,
+		() => {
+			const proc = child_process.exec(LS_PATH);
+			return Promise.resolve(proc);
+		},
 		clientOptions
 	);
+	const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 1);
+	statusBarItem.name = "OrchidLS status"
+	statusBarItem.hide();
 	client.start().catch(e => console.error(e));
 	context.subscriptions.push(client);
+	client.onDidChangeState(handleState);
+	function handleState() {
+		statusBarItem.show();
+		if (client.state == State.Stopped) {
+			statusBarItem.text = "OrchidLS stopped"
+		} else if (client.state == State.Starting) {
+			statusBarItem.text = "OrchidLS starting...";
+		} else {
+			statusBarItem.text = "OrchidLS OK";
+		}
+		statusBarItem.show();
+	}
+	handleState();
 
 	// In debug mode, watch the server executable.
 	if (context.extensionMode !== vscode.ExtensionMode.Production) {
