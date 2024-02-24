@@ -2,15 +2,19 @@
 	"folders": [
 		{
 			"path": "./client",
-			"name": "Client"
+			"name": "CLIENT"
 		},
 		{
 			"path": "./server",
-			"name": "Server"
+			"name": "SERVER"
+		},
+		{
+			"path": "../orchid",
+			"name": "ORCHIDLANG",
 		},
 		{
 			"path": ".",
-			"name": "Root",
+			"name": "ROOT",
 		}
 	],
 	"settings": {
@@ -43,5 +47,8 @@
 		"rust-analyzer.rustfmt.extraArgs": [
 			"+nightly"
 		],
+		"git.ignoredRepositories": [
+			"../orchid"
+		]
 	}
 }

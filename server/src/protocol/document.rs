@@ -1,74 +1,21 @@
-use itertools::Itertools;
+use std::borrow::Cow;
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::{fmt, hash};
+
+use intern_all::i;
+use orchidlang::name::VPath;
 use serde::{Deserialize, Serialize};
+use trait_set::trait_set;
+
+use super::docpos::DocPos;
 
 /// Entries in `workspaceEntries` on init
-#[derive(Serialize, Deserialize, Clone, Debug, Hash, PartialEq, Eq)]
+#[derive(Deserialize, Clone, Debug, Hash, PartialEq, Eq)]
 pub struct WspaceEnt {
   pub name: String,
-  pub uri: String,
-}
-
-/// A document position according to LSP. Characters denote utf-16 code points,
-/// and lines end with `\r`, `\n` or `\r\n`.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct DocPos {
-  pub line: usize,
-  pub character: usize,
-}
-impl DocPos {
-  pub fn to_byte_i<const N: usize>(positions: [Self; N], text: &str) -> [usize; N] {
-    assert!(!text.contains('\r'), "Unicode newlines only");
-    let mut pos_idx_tbl = positions.into_iter().enumerate().collect_vec();
-    pos_idx_tbl.sort_unstable_by(|p1, p2| p2.1.cmp(&p1.1));
-    let mut cur = pos_idx_tbl.pop().unwrap();
-    let mut bpos_idx_tbl = Vec::<(usize, usize)>::with_capacity(N);
-    let mut bytes = 0;
-    'outer: for (line_i, line) in text.split('\n').enumerate() {
-      if cur.1.line < line_i {
-        bytes += line.len();
-        continue;
-      }
-      let mut u16cp = 0;
-      let mut l_bytes = 0;
-      for c in line.chars() {
-        assert!(cur.1.line <= line_i, "Points past end of line");
-        if cur.1.line == line_i {
-          assert!(cur.1.character <= u16cp, "Points inside a utf-16 codepoint");
-          if cur.1.character == u16cp {
-            bpos_idx_tbl.push((cur.0, bytes + l_bytes));
-            'inner: loop {
-              // loop to deal with repeat positions in iterating pattern
-              if let Some(c) = pos_idx_tbl.pop() {
-                if cur == c {
-                  bpos_idx_tbl.push((c.0, bytes + l_bytes));
-                  continue;
-                }
-                cur = c;
-                break 'inner;
-              }
-              break 'outer;
-            }
-          }
-        }
-        u16cp += c.len_utf16();
-        l_bytes += c.len_utf8();
-      }
-      bytes += l_bytes + 1; // for the newline
-    }
-    bpos_idx_tbl.sort_unstable_by_key(|p| p.0);
-    bpos_idx_tbl.into_iter().map(|p| p.1).collect_vec().try_into().expect("Same number in as out")
-  }
-
-  pub fn from_byte_i<const N: usize>(positions: [usize; N], text: &str) -> [Self; N] {
-    assert!(!text.contains('\r'), "Unicode newlines only");
-    positions.map(|pos| {
-      let (prev, _) = text.split_at(pos);
-      Self {
-        line: prev.chars().filter(|c| *c == '\n').count(),
-        character: prev.chars().rev().take_while(|c| *c != '\n').count(),
-      }
-    })
-  }
+  pub uri: FileUri,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -77,13 +24,72 @@ pub struct DocRange {
   pub end: DocPos,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 pub struct TextDocumentItem {
-  pub uri: String,
+  pub uri: FileUri,
   #[serde(alias = "languageId")]
   pub language_id: String,
   pub version: i64,
   pub text: String,
 }
 
+trait_set! {
+  pub trait UriSegments<'a> = Iterator<Item = Cow<'a, str>> + Clone + 'a
+}
 
+/// A file URI
+///
+/// # Assumptions
+///
+/// These derive from the overarching concept of a file URI and apply to each
+/// constituent concept:
+///
+/// - all path segments are valid Unicode
+/// - all paths are absolute
+/// - the prefix is always file:///. No host, no alternative schema
+///
+/// The path segments'
+#[derive(Clone, Debug, Eq)]
+pub struct FileUri(Arc<String>);
+impl FileUri {
+  pub fn to_path(&self) -> PathBuf {
+    url::Url::from_str(&format!("file:///{}", self.0)).unwrap().to_file_path().unwrap()
+  }
+  pub fn segments(&self) -> impl UriSegments {
+    self.0.split('/').map(|s| urlencoding::decode(s).unwrap())
+  }
+  pub fn to_vpath(&self, prefix: &FileUri) -> Option<VPath> {
+    let rest = self.0.strip_prefix(&*prefix.0)?;
+    if rest.is_empty() {
+      return Some(VPath::new([]));
+    }
+    let rest = rest.strip_prefix('/')?;
+    Some(VPath::new(rest.split('/').map(i)))
+  }
+  #[must_use = "This is a pure function"]
+  pub fn extended<S: AsRef<str>>(&self, segments: impl IntoIterator<Item = S>) -> Self {
+    Self(Arc::new(segments.into_iter().fold(self.0.to_string(), |s, seg| s + "/" + seg.as_ref())))
+  }
+  pub fn stringify(&self, is_file: bool) -> String {
+    format!("file:///{}{}", self.0, is_file.then_some(".orc").unwrap_or_default())
+  }
+}
+impl fmt::Display for FileUri {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "file:///{}", self.0) }
+}
+impl<'de> Deserialize<'de> for FileUri {
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where D: serde::Deserializer<'de> {
+    let s = String::deserialize(deserializer)?;
+    let path = (s.strip_prefix("file:///"))
+      .ok_or_else(|| serde::de::Error::custom("FileUri has non-file scheme"))?;
+    let path = path.strip_suffix('/').or(path.strip_suffix(".orc")).unwrap_or(path);
+    Ok(Self(Arc::new(path.to_string())))
+  }
+}
+impl PartialEq for FileUri {
+  fn eq(&self, other: &Self) -> bool { self.segments().eq(other.segments()) }
+}
+impl hash::Hash for FileUri {
+  fn hash<H: hash::Hasher>(&self, state: &mut H) { self.segments().for_each(|seg| seg.hash(state)) }
+}

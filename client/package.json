@@ -1,5 +1,5 @@
 {
-  "name": "orchid-ls",
+  "name": "orchidls",
   "displayName": "OrchidLS",
   "description": "Language server support for Orchid",
   "version": "0.0.1",
@@ -10,6 +10,7 @@
     "Other"
   ],
   "activationEvents": [
+    "workspaceContains:**/*.orc",
     "onLanguage:orchid"
   ],
   "main": "./out/extension.js",
@@ -25,15 +26,68 @@
           ".orc"
         ],
         "icon": {
-          "dark": "./public/outline-flower.svg",
+          "dark": "./public/fill-flower.svg",
           "light": "./public/fill-flower.svg"
         }
       }
     ],
+    "grammars": [
+      {
+        "language": "orchid",
+        "scopeName": "source.orchid",
+        "path": "./public/orchid.tmLanguage.json"
+      }
+    ],
     "commands": [
       {
-        "command": "orchid-ls.restart-server",
+        "command": "orchidls.restart-server",
         "title": "Restart Orchid language server"
+      }
+    ],
+    "configuration": {
+      "orchidls.trace.server": {
+        "scope": "window",
+        "type": "string",
+        "enum": [
+          "off",
+          "messages",
+          "verbose"
+        ],
+        "default": "verbose"
+      }
+    },
+    "colors": [
+      {
+        "id": "syntax.keyword.orchid",
+        "description": "Syntax highlighting for keywords matched and consumed by macros",
+        "defaults": {
+          "dark": "#569CD6",
+          "light": "#0000FF"
+        }
+      },
+      {
+        "id": "syntax.variable.orchid",
+        "description": "Syntax highlighting for names bound in the enclosing context",
+        "defaults": {
+          "dark": "#9CDCFE",
+          "light": "#000"
+        }
+      },
+      {
+        "id": "syntax.constant.orchid",
+        "description": "Syntax highlighting for unbound names belonging to constants",
+        "defaults": {
+          "dark": "#dcdcaa",
+          "light": "#66c"
+        }
+      },
+      {
+        "id": "syntax.parameter.orchid",
+        "description": "Syntax highlighting for parameters in name bindings",
+        "defaults": {
+          "dark": "#69cafd",
+          "light": "#333"
+        }
       }
     ]
   },

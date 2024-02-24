@@ -1,17 +1,15 @@
-use std::borrow::{Borrow, BorrowMut};
 use std::collections::HashMap;
-use std::fmt;
-use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::AtomicI64;
 use std::sync::{atomic, Arc, Mutex, MutexGuard};
+use std::{fmt, mem};
 
 use anyhow::anyhow;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use trait_set::trait_set;
 
-use crate::ctx_map::CtxMap;
+use crate::ctx_map::{Ctx, CtxMap};
 use crate::protocol::error::LSPErrCode;
 
 static NEXT_REQ: AtomicI64 = AtomicI64::new(0);
@@ -20,8 +18,18 @@ static NEXT_REQ: AtomicI64 = AtomicI64::new(0);
 pub struct Abort(Arc<atomic::AtomicBool>);
 impl Abort {
   pub fn new() -> Self { Self(Arc::new(atomic::AtomicBool::new(false))) }
-  pub fn abort(&self) { self.0.store(true, atomic::Ordering::Relaxed) }
+  pub fn abort(&self) { self.0.store(true, atomic::Ordering::Release) }
+  /// Check if the abort flag has been set with relaxed memory ordering. The
+  /// relaxed order avoids blocking optimizations, so this can be called
+  /// frequently in the processing pipeline to ensure timely abort detection.
   pub fn aborted(&self) -> bool { self.0.load(atomic::Ordering::Relaxed) }
+  /// Check if the abort flag has been set with strict memory ordering. This
+  /// prevents many optimizations across the load so it should be used
+  /// sparingly, but it enables the abort to double as an expiry marker. If the
+  /// task locks a shared work tracker then calls this function, it can be
+  /// certain that no other task has fulfilled its task, provided that doing so
+  /// would involve aborting this task.
+  pub fn is_valid(&self) -> bool { !self.0.load(atomic::Ordering::Acquire) }
 }
 
 pub struct AsyncReq {
@@ -30,39 +38,18 @@ pub struct AsyncReq {
   params: Option<Value>,
   abort: Abort,
   resolved: bool,
-  comm: Arc<Mutex<CommState>>,
+  comm: Session,
 }
+#[allow(dead_code)] // this struct isn't being used
 impl AsyncReq {
   pub fn name(&self) -> &str { self.name.as_str() }
   pub fn params(&self) -> Option<&Value> { self.params.as_ref() }
   pub fn aborted(&self) -> bool { self.abort.aborted() }
+  pub fn session(&self) -> &Session { &self.comm }
   pub fn resolve(mut self, result: anyhow::Result<Value>) { self.resolve_impl(result) }
   fn resolve_impl(&mut self, result: anyhow::Result<Value>) {
     self.resolved = true;
-    self.comm.lock().unwrap().send_resp(self.id, result)
-  }
-  pub fn request(&self, method: &str, params: Value, callback: impl ResHandler + 'static) {
-    self.comm.lock().unwrap().send_request(method, params, callback)
-  }
-  pub fn notify(&self, method: &str, params: Value) {
-    self.comm.lock().unwrap().send_notif(method, params)
-  }
-  pub fn progress(&self, token: Value, value: Value) {
-    self.comm.lock().unwrap().send_progress(token, value)
-  }
-  pub fn set<T: Send + Sync + 'static>(&mut self, ctx: T) {
-    self.comm.lock().unwrap().context.set(ctx)
-  }
-  pub fn lock(&self) -> impl DerefMut<Target = CtxMap> + '_ {
-    struct Guard<'b>(MutexGuard<'b, CommState>);
-    impl<'b> Deref for Guard<'b> {
-      type Target = CtxMap;
-      fn deref(&self) -> &Self::Target { &self.0.context }
-    }
-    impl<'b> DerefMut for Guard<'b> {
-      fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0.context }
-    }
-    Guard(self.comm.lock().unwrap())
+    self.comm.0.lock().unwrap().send_resp(self.id, result)
   }
 }
 impl Drop for AsyncReq {
@@ -84,26 +71,37 @@ impl fmt::Debug for AsyncReq {
 
 trait_set! {
   pub trait ReqHandler =
-    for<'a, 'b> FnMut(Option<&'a Value>, &'b mut CtxMap) -> anyhow::Result<Value>;
-  pub trait AsyncReqHandler = FnMut(AsyncReq);
-  pub trait NotifHandler = for<'a, 'b> FnMut(Option<&'a Value>, &'b mut CtxMap);
-  pub trait SendCB = FnMut(Value) + Send;
-  pub trait ResHandler = FnMut(Result<Value, ResponseError>) + Send;
+    for<'a, 'b> FnMut(Option<&'a Value>, Session) -> anyhow::Result<Value> + 'static;
+  pub trait AsyncReqHandler = FnMut(AsyncReq) + 'static;
+  pub trait NotifHandler = for<'a, 'b> FnMut(Option<&'a Value>, Session) + 'static;
+  pub trait SendCB = FnMut(Value) + Send + 'static;
+  pub trait ResHandler = FnMut(Result<Value, ResponseError>) + Send + 'static;
 }
 
+#[derive(Debug)]
 pub struct ResponseError {
   pub code: LSPErrCode,
   pub message: String,
   pub data: Option<Value>,
 }
 
-struct CommState {
+struct State {
   ingress: HashMap<i64, Abort>,
   egress: HashMap<i64, Box<dyn ResHandler>>,
   context: CtxMap,
   send: Box<dyn SendCB>,
 }
-impl CommState {
+
+impl State {
+  fn new(send: impl SendCB) -> Self {
+    Self {
+      context: CtxMap::new(),
+      egress: HashMap::new(),
+      ingress: HashMap::new(),
+      send: Box::new(send),
+    }
+  }
+
   fn send(&mut self, mut data: Value) {
     data["jsonrpc"] = json!("2.0");
     eprintln!("Sending {data}");
@@ -128,7 +126,7 @@ impl CommState {
       },
     })
   }
-  pub fn send_request(&mut self, method: &str, params: Value, callback: impl ResHandler + 'static) {
+  pub fn send_request(&mut self, method: &str, params: Value, callback: impl ResHandler) {
     let id = NEXT_REQ.fetch_add(1, atomic::Ordering::Relaxed);
     self.egress.insert(id, Box::new(callback));
     self.send(json!({ "id": id, "method": method, "params": params }))
@@ -155,52 +153,82 @@ impl CommState {
   }
 }
 
+pub struct SessionGuard<'b>(MutexGuard<'b, State>);
+impl<'b> SessionGuard<'b> {
+  pub fn request(&mut self, method: &str, params: Value, callback: impl ResHandler) {
+    self.0.send_request(method, params, callback)
+  }
+  pub fn notify(&mut self, method: &str, params: Value) { self.0.send_notif(method, params) }
+  pub fn progress(&mut self, token: Value, value: Value) { self.0.send_progress(token, value) }
+}
+impl<'a> Deref for SessionGuard<'a> {
+  type Target = CtxMap;
+  fn deref(&self) -> &Self::Target { &self.0.context }
+}
+impl<'a> DerefMut for SessionGuard<'a> {
+  fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0.context }
+}
+
+#[derive(Clone)]
+pub struct Session(Arc<Mutex<State>>);
+impl Session {
+  fn new(send: impl SendCB) -> Self { Self(Arc::new(Mutex::new(State::new(send)))) }
+
+  pub fn request(&self, method: &str, params: Value, callback: impl ResHandler) {
+    self.lock().request(method, params, callback)
+  }
+  pub fn notify(&self, method: &str, params: Value) { self.lock().notify(method, params) }
+  #[allow(unused)] // we definitely need this but definitely not now
+  pub fn progress(&self, token: Value, value: Value) { self.lock().progress(token, value) }
+  pub fn set<U: Ctx>(&self, ctx: U) { self.0.lock().unwrap().context.set(ctx) }
+  pub fn lock(&self) -> SessionGuard<'_> { SessionGuard(self.0.lock().unwrap()) }
+}
+
 pub struct JrpcServer {
   sync_hands: HashMap<String, Box<dyn ReqHandler>>,
   async_hands: HashMap<String, Box<dyn AsyncReqHandler>>,
   notif_hands: HashMap<String, Box<dyn NotifHandler>>,
-  comm: Arc<Mutex<CommState>>,
+  comm: Session,
 }
 impl JrpcServer {
-  pub fn new(send: impl FnMut(Value) + Clone + Send + Sync + 'static) -> Self {
+  pub fn new(send: impl SendCB) -> Self {
     Self {
       notif_hands: HashMap::new(),
       sync_hands: HashMap::new(),
       async_hands: HashMap::new(),
-      comm: Arc::new(Mutex::new(CommState {
-        ingress: HashMap::new(),
-        egress: HashMap::new(),
-        send: Box::new(send),
-        context: CtxMap::new(),
-      })),
+      comm: Session::new(send),
     }
   }
 
-  pub fn on_req_sync(&mut self, name: &str, handler: impl ReqHandler + 'static) {
+  pub fn on_req_sync(&mut self, name: &str, handler: impl ReqHandler) {
     self.sync_hands.insert(name.to_string(), Box::new(handler));
   }
 
-  pub fn on_notif(&mut self, name: &str, handler: impl NotifHandler + 'static) {
+  pub fn on_notif(&mut self, name: &str, handler: impl NotifHandler) {
     self.notif_hands.insert(name.to_string(), Box::new(handler));
   }
 
-  pub fn on_req_async(&mut self, name: &str, handler: impl AsyncReqHandler + 'static) {
+  #[allow(dead_code)] // not being used yet
+  pub fn on_req_async(&mut self, name: &str, handler: impl AsyncReqHandler) {
     self.async_hands.insert(name.to_string(), Box::new(handler));
   }
 
   pub fn recv(&mut self, message: Value) {
-    eprintln!("Received {message}");
-    let mut comm_guard = self.comm.lock().unwrap();
+    // eprintln!("Received {message}");
+    let mut comm_guard = self.comm.0.lock().unwrap();
     let obj = message.as_object().expect("All messages are objects");
     let id = obj.get("id").map(|id| id.as_i64().expect("If ID exists, it's an uint"));
-    match obj["method"].as_str() {
+    match obj.get("method").map(|m| m.as_str().unwrap()) {
       None => comm_guard.handle_resp(message),
       Some(name) => {
         let params = obj.get("params");
         match id {
           None => match self.notif_hands.get_mut(name) {
             None => eprintln!("Unrecognized notification {name}"),
-            Some(handler) => handler(params, &mut comm_guard.context),
+            Some(handler) => {
+              mem::drop(comm_guard);
+              handler(params, self.comm.clone());
+            },
           },
           Some(id) =>
             if name == "$/cancelRequest" {
@@ -209,11 +237,13 @@ impl JrpcServer {
                 abort.abort();
               }
             } else if let Some(handler) = self.sync_hands.get_mut(name) {
-              let res = handler(params, &mut comm_guard.context);
-              comm_guard.send_resp(id, res);
+              mem::drop(comm_guard);
+              let res = handler(params, self.comm.clone());
+              self.comm.0.lock().unwrap().send_resp(id, res);
             } else if let Some(handler) = self.async_hands.get_mut(name) {
               let abort = Abort::new();
               comm_guard.ingress.insert(id, abort.clone());
+              mem::drop(comm_guard);
               handler(AsyncReq {
                 abort,
                 id,
