@@ -45,15 +45,24 @@
       }
     ],
     "configuration": {
-      "orchidls.trace.server": {
-        "scope": "window",
-        "type": "string",
-        "enum": [
-          "off",
-          "messages",
-          "verbose"
-        ],
-        "default": "verbose"
+      "title": "OrchidLS",
+      "properties": {
+        "orchidls.trace.server": {
+          "title": "Server trace logging",
+          "scope": "window",
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "verbose"
+        },
+        "orchidls.output.preopen": {
+          "scope": "window",
+          "type": "boolean",
+          "default": false
+        }
       }
     },
     "colors": [

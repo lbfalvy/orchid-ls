@@ -13,7 +13,7 @@ use serde_json::json;
 use crate::jrpc::{Abort, JrpcServer, Session};
 use crate::orc::project::{find_all_projects, LoadedProject};
 use crate::protocol::document::{FileUri, WspaceEnt};
-use crate::protocol::tokens::transcode_tokens;
+use crate::protocol::tokens::SemToken;
 
 pub fn ttypes() -> Vec<Tok<String>> {
   vec![
@@ -21,7 +21,6 @@ pub fn ttypes() -> Vec<Tok<String>> {
     i!(str: "variable"),
     i!(str: "parameter"),
     i!(str: "function"),
-    i!(str: "macro"),
     i!(str: "comment"),
     i!(str: "operator"),
     i!(str: "string"),
@@ -216,27 +215,22 @@ fn process_update(patch: PatchFile, session: Session) {
         .unwrap_or_else(|ev| panic!("{}", ev.into_iter().join("\n\n")));
       eprintln!("~{id} loaded project");
       let ttypes = ttypes();
-      let fsroot = patches.basepath().extended(lpr.root.as_slice());
-      let vfs = patches.mk_vfs(&fsroot).unwrap();
       let mut file_tokens = HashMap::new();
       for path in changes.into_iter() {
         if abort.aborted() {
           return;
         }
         let mut tokens = lpr.module_tokens(&path.clone().prefix([i!(str: "tree")]));
-        tokens.sort_by_key(|st| st.range.start);
-        let src = match vfs.get(&path, &path).unwrap() {
-          Loaded::Code(c) => c.clone(),
-          _ => panic!("this must be a file"),
-        };
-        let tokens = match tokens.is_empty() {
-          true => vec![],
-          false => transcode_tokens(tokens, &src)
-            .map(|(pos, len, sem)| {
-              (pos.line, pos.char, len, ttypes.iter().position(|x| x == &sem.typ))
-            })
-            .collect_vec(),
-        };
+        tokens.sort_unstable();
+        if tokens.is_empty() {
+          continue;
+        }
+        let tokens = (SemToken::vscode(tokens).into_iter())
+          .map(|(pos, len, sem)| {
+            let typ = ttypes.iter().position(|x| x == &sem.typ()).expect("ttype not found");
+            (pos.line, pos.char, len, typ)
+          })
+          .collect_vec();
         file_tokens.insert(path, tokens);
       }
       let mut g = session.lock();

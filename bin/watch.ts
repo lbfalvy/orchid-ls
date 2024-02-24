@@ -1,5 +1,5 @@
-import fs from "fs/promises";
-import fscb from "fs";
+import fsp from "fs/promises";
+import fs from "fs";
 import child_process from "child_process";
 import path from "path";
 import process from "process";
@@ -42,7 +42,7 @@ function getBuilder(build_dir: string, build_cmd: string): Builder {
 let server_builder = getBuilder(SERVER_DIR, CARGO_CMD);
 async function buildServer() {
   if (!await server_builder.build()) return;
-  await fs.cp(EXE_PATH, EXE_DEST);
+  await fsp.cp(EXE_PATH, EXE_DEST);
 }
 let orchid_builder = getBuilder(ORCHID_DIR, CARGO_CMD);
 async function buildOrchid() {
@@ -50,19 +50,15 @@ async function buildOrchid() {
   await buildServer();
 }
 
-async function* watchRustProject(path: string): AsyncGenerator<undefined, undefined, undefined> {
+async function* watchRustProject(proj: string): AsyncGenerator<undefined, undefined, undefined> {
+  const src_watcher = fs.watch(path.join(proj, "src"), { persistent: true, recursive: true });
+  const cargo_watcher = fs.watch(path.join(proj, "Cargo.lock"), { persistent: true, recursive: true });
+  let resume: ((_: void) => void) | undefined;
+  src_watcher.on("change", () => resume?.());
+  cargo_watcher.on("change", () => resume?.());
   while (true) {
-    try {
-      for await (const chg of fs.watch(path, { recursive: true, persistent: true })) {
-        if (!chg.filename) continue;
-        const ext = chg.filename.split(".").pop();
-        if (ext !== undefined && ["rs", "toml"].includes(ext)) yield;
-      }
-    } catch (e) {
-      // this happens sometimes when Cargo instances interfere with each other
-      if (e.code === "ENOENT" && fscb.existsSync(path)) continue;
-      throw e;
-    }
+    await new Promise(r => resume = r);
+    yield;
   }
 }
 

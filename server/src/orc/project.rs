@@ -101,7 +101,7 @@ impl LoadedProject {
     let mut tokv = vec![];
     self.tree.0.search_all((), |_, mem, ()| {
       if let ModMemberRef::Item(ProjItem { kind: ItemKind::Const(val) }) = mem {
-        tokv.extend(tokens(val, &val.range.path(), &self.macros))
+        tokv.extend(tokens(val, &val.range.path(), &self.macros).into_iter().flatten())
       }
     });
     tokv
@@ -120,7 +120,9 @@ impl LoadedProject {
       }),
       _ => return vec![],
     };
-    consts.into_iter().flat_map(|c| tokens(c, &c.range.path(), &self.macros)).collect()
+    (consts.into_iter())
+      .flat_map(|c| tokens(c, &c.range.path(), &self.macros).into_iter().flatten())
+      .collect()
   }
 }
 
@@ -128,41 +130,38 @@ pub fn tokens(
   expr: &parsed::Expr,
   path: &Sym,
   macros: &MacroRunner,
-) -> impl Iterator<Item = SemToken> {
-  match macros.process_expr(expr.clone()) {
-    Err(_) => HashMap::new().into_values(),
-    Ok(postmacro) => {
-      let n_toks = name_toks(&postmacro, Substack::Bottom, path);
-      let mut tokens = Vec::new();
-      expr.search_all(&mut |ex| {
-        if &ex.range.path() != path {
-          return None;
-        }
-        let range = ex.range.range();
-        match &ex.value {
-          parsed::Clause::Name(n) if !n_toks.contains_key(&ex.range) => {
-            let typ =
-              if n.last().starts_with(namestart) { i!(str: "macro") } else { i!(str: "operator") };
-            tokens.push(SemToken { range, file: ex.range.path(), typ, mods: vec![] });
+) -> Option<impl Iterator<Item = SemToken>> {
+  let postmacro = macros.process_expr(expr.clone()).ok()?;
+  let n_toks = name_toks(&postmacro, Substack::Bottom, path);
+  let mut tokens = Vec::new();
+  expr.search_all(&mut |ex| {
+    if &ex.range.path() != path {
+      return None;
+    }
+    match &ex.value {
+      parsed::Clause::Name(n) if !n_toks.contains_key(&ex.range) => {
+        let is_name = n.last().starts_with(namestart);
+        let ty = if is_name { i!(str: "keyword") } else { i!(str: "operator") };
+        tokens.push(SemToken::new(ex.range.clone(), ty));
+      },
+      parsed::Clause::Atom(at) => {
+        let atom = at.run();
+        tokens.push(SemToken::new(
+          ex.range.clone(),
+          if atom.is::<Inert<usize>>() || atom.is::<Inert<NotNan<f64>>>() {
+            i!(str: "number")
+          } else if atom.is::<Inert<bool>>() {
+            i!(str: "keyword")
+          } else {
+            i!(str: "string")
           },
-          parsed::Clause::Atom(at) => {
-            let atom = at.run();
-            let file = ex.range.path();
-            if atom.is::<Inert<usize>>() || atom.is::<Inert<NotNan<f64>>>() {
-              tokens.push(SemToken { range, file, typ: i!(str: "number"), mods: vec![] });
-            } else if atom.is::<Inert<bool>>() {
-              tokens.push(SemToken { range, file, typ: i!(str: "keyword"), mods: vec![] });
-            } else {
-              tokens.push(SemToken { range, file, typ: i!(str: "string"), mods: vec![] })
-            }
-          },
-          _ => (),
-        }
-        None::<()>
-      });
-      n_toks.into_values()
-    },
-  }
+        ));
+      },
+      _ => (),
+    }
+    None::<()>
+  });
+  Some(n_toks.into_values().chain(tokens))
 }
 
 /// Create tokens for all names that have the same origin path (were not created
@@ -179,13 +178,7 @@ pub fn name_toks(
       let bindings = match &arg[..] {
         [parsed::Expr { value: parsed::Clause::Name(n), range }] => {
           if &range.path() == path {
-            let token = SemToken {
-              range: range.range(),
-              file: range.path(),
-              typ: i!(str: "parameter"),
-              mods: vec![],
-            };
-            map.insert(range.clone(), token);
+            map.insert(range.clone(), SemToken::new(range.clone(), i!(str: "parameter")));
           }
           bindings.push(n.clone())
         },
@@ -197,14 +190,9 @@ pub fn name_toks(
       map
     },
     parsed::Clause::Name(n) if &ast.range.path() == path => {
-      let typ =
-        if bindings.iter().any(|b| b == n) { i!(str: "variable") } else { i!(str: "function") };
-      HashMap::from([(ast.range.clone(), SemToken {
-        range: ast.range.range(),
-        file: ast.range.path(),
-        typ,
-        mods: vec![],
-      })])
+      let is_bound = bindings.iter().any(|b| b == n);
+      let ty = if is_bound { i!(str: "variable") } else { i!(str: "function") };
+      HashMap::from([(ast.range.clone(), SemToken::new(ast.range.clone(), ty))])
     },
     parsed::Clause::S(_, b) => {
       let mut hash = HashMap::new();
